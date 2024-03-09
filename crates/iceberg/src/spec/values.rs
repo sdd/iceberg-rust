@@ -1141,6 +1141,11 @@ impl Struct {
             },
         )
     }
+
+    /// Gets a ref to the field at `position` within the `Struct`
+    pub fn get(&self, position: i32) -> &Literal {
+        &self.fields[position as usize]
+    }
 }
 
 /// An iterator that moves out of a struct.

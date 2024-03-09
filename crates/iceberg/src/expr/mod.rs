@@ -17,12 +17,14 @@
 
 //! This module contains expressions.
 
-mod term;
-
 use std::fmt::{Display, Formatter};
 
 pub use term::*;
-mod predicate;
+
+pub(crate) mod accessor;
+pub(crate) mod predicate;
+pub(crate) mod term;
+pub(crate) mod visitors;
 
 use crate::spec::SchemaRef;
 pub use predicate::*;
