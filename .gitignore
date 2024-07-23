@@ -21,6 +21,10 @@ Cargo.lock
 .vscode
 **/.DS_Store
 dist/*
+
 **/venv
 *.so
 *.pyc
+
+crates/iceberg/testdata/performance/raw_data/*
+crates/iceberg/testdata/performance/warehouse
