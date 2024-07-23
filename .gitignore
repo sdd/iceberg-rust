@@ -21,3 +21,5 @@
 .vscode
 **/.DS_Store
 dist/*
+crates/iceberg/testdata/performance/raw_data/*
+

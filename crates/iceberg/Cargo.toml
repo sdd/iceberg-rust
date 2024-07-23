@@ -76,10 +76,13 @@ tokio = { workspace = true, optional = true }
 typed-builder = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
+futures-util = "0.3.30"
 
 [dev-dependencies]
 ctor = { workspace = true }
+iceberg-catalog-rest = { path = "../catalog/rest" }
 iceberg_test_utils = { path = "../test_utils", features = ["tests"] }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
 tera = { workspace = true }
+
