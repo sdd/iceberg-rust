@@ -135,7 +135,7 @@ impl<'a> TableScanBuilder<'a> {
         self
     }
 
-    /// Provides a TableScanConfig to use as teh config for this TableScan
+    /// Provides a TableScanConfig to use as the config for this TableScan
     pub fn with_config(mut self, table_scan_config: TableScanConfig) -> Self {
         self.table_scan_config = table_scan_config;
         self

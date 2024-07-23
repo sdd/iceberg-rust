@@ -77,8 +77,12 @@ impl DockerCompose {
         )
     }
 
+    pub fn get_container_name(&self, service_name: impl AsRef<str>) -> String {
+        format!("{}-{}-1", self.project_name, service_name.as_ref())
+    }
+
     pub fn get_container_ip(&self, service_name: impl AsRef<str>) -> String {
-        let container_name = format!("{}-{}-1", self.project_name, service_name.as_ref());
+        let container_name = self.get_container_name(service_name.as_ref());
         let mut cmd = Command::new("docker");
         cmd.arg("inspect")
             .arg("-f")
@@ -89,10 +93,62 @@ impl DockerCompose {
             .trim()
             .to_string()
     }
-}
 
-impl Drop for DockerCompose {
-    fn drop(&mut self) {
+    pub fn get_host_port(&self, service_name: impl AsRef<str>, container_port: u16) -> String {
+        let container_name = self.get_container_name(service_name.as_ref());
+        let mut cmd = Command::new("docker");
+
+        cmd.arg("port")
+            .arg(&container_name)
+            .arg(format!("{}/tcp", container_port));
+
+        let binding = get_cmd_output(cmd, format!("Get host port for {container_name}"))
+            .trim()
+            .to_string();
+        let output = binding.lines().next().unwrap();
+
+        let ip_and_port = output.split(":").collect::<Vec<_>>();
+
+        ip_and_port[1].to_string()
+    }
+
+    pub fn exec_on_container(
+        &self,
+        service_name: String,
+        command: String,
+        args: &[String],
+        description: String,
+    ) {
+        let container_name = self.get_container_name(service_name);
+
+        let mut cmd = Command::new("docker");
+        cmd.arg("exec").arg(&container_name).arg(command).args(args);
+
+        run_command(
+            cmd,
+            format!(
+                "Executing command on container {}, project name: {}: '{}'",
+                &container_name, self.project_name, description
+            ),
+        )
+    }
+
+    pub fn stop(&mut self) {
+        let mut cmd = Command::new("docker");
+        cmd.current_dir(&self.docker_compose_dir);
+
+        cmd.args(vec!["compose", "-p", self.project_name.as_str(), "stop"]);
+
+        run_command(
+            cmd,
+            format!(
+                "Stopping docker compose in {}, project name: {}",
+                self.docker_compose_dir, self.project_name
+            ),
+        )
+    }
+
+    pub fn remove(&mut self) {
         let mut cmd = Command::new("docker");
         cmd.current_dir(&self.docker_compose_dir);
 

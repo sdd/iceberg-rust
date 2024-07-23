@@ -26,8 +26,18 @@ repository = { workspace = true }
 license = { workspace = true }
 
 [dependencies]
+anyhow = "1"
 env_logger = { workspace = true }
 log = "0.4.20"
+tokio = { version = "1.39.1", features = ["macros", "rt-multi-thread"] }
 
 [features]
 tests = []
+
+[[bin]]
+name = "perf_testing"
+
+[lib]
+name = "iceberg_test_utils"
+path = "src/lib.rs"
+

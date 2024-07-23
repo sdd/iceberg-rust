@@ -15,11 +15,21 @@
 # specific language governing permissions and limitations
 # under the License.
 
-/target
-/Cargo.lock
-.idea
-.vscode
-**/.DS_Store
-dist/*
-crates/iceberg/testdata/performance/raw_data/*
+default:
+    just --list --unsorted
+
+perf_tests_start:
+    cd crates/iceberg/testdata/performance && cargo run -p iceberg_test_utils --bin perf_testing -- start && cd -
+
+perf_tests_stop:
+    cd crates/iceberg/testdata/performance && cargo run -p iceberg_test_utils --bin perf_testing -- stop && cd -
+
+perf_tests_init:
+    cd crates/iceberg/testdata/performance && cargo run -p iceberg_test_utils --bin perf_testing -- init && cd -
+
+perf_tests_remove:
+    cd crates/iceberg/testdata/performance && cargo run -p iceberg_test_utils --bin perf_testing -- remove && cd -
+
+perf_tests_run:
+    cargo criterion --benches
 

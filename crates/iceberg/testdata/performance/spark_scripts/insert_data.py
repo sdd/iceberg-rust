@@ -15,11 +15,8 @@
 # specific language governing permissions and limitations
 # under the License.
 
-/target
-/Cargo.lock
-.idea
-.vscode
-**/.DS_Store
-dist/*
-crates/iceberg/testdata/performance/raw_data/*
+from pyspark.sql import SparkSession
 
+spark = SparkSession.builder.appName("test").getOrCreate()
+
+spark.read.parquet("/home/iceberg/raw_data/yellow_tripdata_2024-01.parquet").writeTo("nyc.taxis").append()
