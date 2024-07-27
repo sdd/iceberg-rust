@@ -28,3 +28,16 @@ services:
       MINIO_CONSOLE_ADDRESS: ':9001'
     entrypoint: sh
     command: -c 'mkdir -p /data/bucket1 && /usr/bin/minio server /data'
+  haproxy:
+    image: haproxy:lts-bookworm
+    ports:
+      - 9000
+    volumes:
+      - type: bind
+        source: ./haproxy.cfg
+        target: /usr/local/etc/haproxy/haproxy.cfg
+        read_only: true
+    depends_on:
+      - minio
+
+
