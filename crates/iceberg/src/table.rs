@@ -207,7 +207,7 @@ impl Table {
 
     /// Create a reader for the table.
     pub fn reader_builder(&self) -> ArrowReaderBuilder {
-        ArrowReaderBuilder::new(self.file_io.clone())
+        ArrowReaderBuilder::new(self.file_io.clone(), self.object_cache.clone())
     }
 }
 
@@ -287,7 +287,7 @@ impl StaticTable {
 
     /// Create a reader for the table.
     pub fn reader_builder(&self) -> ArrowReaderBuilder {
-        ArrowReaderBuilder::new(self.0.file_io.clone())
+        ArrowReaderBuilder::new(self.0.file_io.clone(), self.0.object_cache.clone())
     }
 }
 

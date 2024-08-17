@@ -31,19 +31,20 @@ use bytes::Bytes;
 use fnv::FnvHashSet;
 use futures::channel::mpsc::{channel, Sender};
 use futures::future::BoxFuture;
-use futures::{try_join, SinkExt, StreamExt, TryFutureExt, TryStreamExt};
+use futures::{try_join, SinkExt, StreamExt, TryStreamExt};
 use parquet::arrow::arrow_reader::{ArrowPredicateFn, ArrowReaderOptions, RowFilter, RowSelection};
-use parquet::arrow::async_reader::{AsyncFileReader, MetadataLoader};
+use parquet::arrow::async_reader::{AsyncFileReader, MetadataFetch};
 use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask, PARQUET_FIELD_ID_META_KEY};
+use parquet::errors::ParquetError;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::schema::types::{SchemaDescriptor, Type as ParquetType};
-
 use crate::arrow::{arrow_schema_to_schema, get_arrow_datum};
 use crate::error::Result;
 use crate::expr::visitors::bound_predicate_visitor::{visit, BoundPredicateVisitor};
 use crate::expr::visitors::page_index_evaluator::PageIndexEvaluator;
 use crate::expr::visitors::row_group_metrics_evaluator::RowGroupMetricsEvaluator;
 use crate::expr::{BoundPredicate, BoundReference};
+use crate::io::object_cache::ObjectCache;
 use crate::io::{FileIO, FileMetadata, FileRead};
 use crate::runtime::spawn;
 use crate::scan::{ArrowRecordBatchStream, FileScanTask, FileScanTaskStream};
@@ -55,6 +56,7 @@ use crate::{Error, ErrorKind};
 pub struct ArrowReaderBuilder {
     batch_size: Option<usize>,
     file_io: FileIO,
+    object_cache: Arc<ObjectCache>,
     concurrency_limit_data_files: usize,
     row_group_filtering_enabled: bool,
     row_selection_enabled: bool,
@@ -62,12 +64,13 @@ pub struct ArrowReaderBuilder {
 
 impl ArrowReaderBuilder {
     /// Create a new ArrowReaderBuilder
-    pub(crate) fn new(file_io: FileIO) -> Self {
+    pub(crate) fn new(file_io: FileIO, object_cache: Arc<ObjectCache>) -> Self {
         let num_cpus = available_parallelism().get();
 
         ArrowReaderBuilder {
             batch_size: None,
             file_io,
+            object_cache,
             concurrency_limit_data_files: num_cpus,
             row_group_filtering_enabled: true,
             row_selection_enabled: false,
@@ -104,6 +107,7 @@ impl ArrowReaderBuilder {
         ArrowReader {
             batch_size: self.batch_size,
             file_io: self.file_io,
+            object_cache: self.object_cache,
             concurrency_limit_data_files: self.concurrency_limit_data_files,
             row_group_filtering_enabled: self.row_group_filtering_enabled,
             row_selection_enabled: self.row_selection_enabled,
@@ -116,6 +120,7 @@ impl ArrowReaderBuilder {
 pub struct ArrowReader {
     batch_size: Option<usize>,
     file_io: FileIO,
+    object_cache: Arc<ObjectCache>,
 
     /// the maximum number of data files that can be fetched at the same time
     concurrency_limit_data_files: usize,
@@ -129,6 +134,7 @@ impl ArrowReader {
     /// Returns a stream of Arrow RecordBatches containing the data from the files
     pub fn read(self, tasks: FileScanTaskStream) -> Result<ArrowRecordBatchStream> {
         let file_io = self.file_io.clone();
+        let object_cache = self.object_cache.clone();
         let batch_size = self.batch_size;
         let concurrency_limit_data_files = self.concurrency_limit_data_files;
         let row_group_filtering_enabled = self.row_group_filtering_enabled;
@@ -139,10 +145,10 @@ impl ArrowReader {
 
         spawn(async move {
             let result = tasks
-                .map(|task| Ok((task, file_io.clone(), tx.clone())))
+                .map(|task| Ok((task, file_io.clone(), object_cache.clone(), tx.clone())))
                 .try_for_each_concurrent(
                     concurrency_limit_data_files,
-                    |(file_scan_task, file_io, tx)| async move {
+                    |(file_scan_task, file_io, object_cache, tx)| async move {
                         match file_scan_task {
                             Ok(task) => {
                                 let file_path = task.data_file_path().to_string();
@@ -152,6 +158,7 @@ impl ArrowReader {
                                         task,
                                         batch_size,
                                         file_io,
+                                        object_cache,
                                         tx,
                                         row_group_filtering_enabled,
                                         row_selection_enabled,
@@ -179,6 +186,7 @@ impl ArrowReader {
         task: FileScanTask,
         batch_size: Option<usize>,
         file_io: FileIO,
+        object_cache: Arc<ObjectCache>,
         mut tx: Sender<Result<RecordBatch>>,
         row_group_filtering_enabled: bool,
         row_selection_enabled: bool,
@@ -188,7 +196,12 @@ impl ArrowReader {
         let parquet_file = file_io.new_input(task.data_file_path())?;
         let (parquet_metadata, parquet_reader) =
             try_join!(parquet_file.metadata(), parquet_file.reader())?;
-        let parquet_file_reader = ArrowFileReader::new(parquet_metadata, parquet_reader);
+        let parquet_file_reader = ArrowFileReader::new(
+            parquet_metadata,
+            parquet_reader,
+            object_cache,
+            task.data_file_path(),
+        );
 
         let should_load_page_index = row_selection_enabled && task.predicate().is_some();
 
@@ -441,9 +454,6 @@ impl ArrowReader {
                 // skip row groups that aren't present in selected_row_groups
                 if idx == selected_row_groups[selected_row_groups_idx] {
                     selected_row_groups_idx += 1;
-                    if selected_row_groups_idx == selected_row_groups.len() {
-                        break;
-                    }
                 } else {
                     continue;
                 }
@@ -459,6 +469,13 @@ impl ArrowReader {
             )?;
 
             results.push(selections_for_page);
+
+            if let Some(selected_row_groups) = selected_row_groups {
+                // exit the loop if this was the last row group in the selection
+                if selected_row_groups_idx == selected_row_groups.len() {
+                    break;
+                }
+            }
         }
 
         Ok(results.into_iter().flatten().collect::<Vec<_>>().into())
@@ -1051,35 +1068,73 @@ impl<'a> BoundPredicateVisitor for PredicateConverter<'a> {
 /// contains the following hints to speed up metadata loading, we can consider adding them to this struct:
 ///
 /// - `metadata_size_hint`: Provide a hint as to the size of the parquet file's footer.
-/// - `preload_column_index`: Load the Column Index  as part of [`Self::get_metadata`].
+/// - `preload_column_index`: Load the Column Index as part of [`Self::get_metadata`].
 /// - `preload_offset_index`: Load the Offset Index as part of [`Self::get_metadata`].
-struct ArrowFileReader<R: FileRead> {
+struct ArrowFileReader<R: FileRead + Sync> {
+    file_path: String,
     meta: FileMetadata,
-    r: R,
+    object_cache: Arc<ObjectCache>,
+    r: Arc<R>,
 }
 
-impl<R: FileRead> ArrowFileReader<R> {
+impl<R: FileRead + Sync> Clone for ArrowFileReader<R> {
+    fn clone(&self) -> Self {
+        ArrowFileReader {
+            file_path: self.file_path.clone(),
+            meta: self.meta.clone(),
+            object_cache: self.object_cache.clone(),
+            r: self.r.clone(),
+        }
+    }
+}
+
+impl<R: FileRead + Sync> ArrowFileReader<R> {
     /// Create a new ArrowFileReader
-    fn new(meta: FileMetadata, r: R) -> Self {
-        Self { meta, r }
+    fn new(meta: FileMetadata, r: R, object_cache: Arc<ObjectCache>, file_path: &str) -> Self {
+        Self {
+            file_path: file_path.to_string(),
+            meta,
+            r: Arc::new(r),
+            object_cache,
+        }
     }
 }
 
-impl<R: FileRead> AsyncFileReader for ArrowFileReader<R> {
-    fn get_bytes(&mut self, range: Range<usize>) -> BoxFuture<'_, parquet::errors::Result<Bytes>> {
-        Box::pin(
+#[async_trait::async_trait]
+impl<R: FileRead + Sync> FileRead for ArrowFileReader<R> {
+    async fn read(&self, range: Range<u64>) -> Result<Bytes> {
+        self.r.read(range).await
+    }
+}
+
+impl<R: FileRead + Sync> MetadataFetch for ArrowFileReader<R> {
+    fn fetch(&mut self, range: Range<usize>) -> BoxFuture<'_, parquet::errors::Result<Bytes>> {
+        Box::pin(async move {
             self.r
-                .read(range.start as _..range.end as _)
-                .map_err(|err| parquet::errors::ParquetError::External(Box::new(err))),
-        )
+                .read(range.start as u64..range.end as u64)
+                .await
+                .map_err(|err| ParquetError::External(Box::new(err)))
+        })
+    }
+}
+
+impl<R: FileRead + Sync> AsyncFileReader for ArrowFileReader<R> {
+    fn get_bytes(&mut self, range: Range<usize>) -> BoxFuture<'_, parquet::errors::Result<Bytes>> {
+        Box::pin(async move {
+            self.object_cache
+                .get_file_bytes(&self.file_path, self.clone(), self.meta.size, range.start as u64..range.end as u64)
+                .await
+                .map_err(|err| ParquetError::External(Box::new(err)))
+        })
     }
 
+    // #[tracing::instrument(level = "info", skip_all)]
     fn get_metadata(&mut self) -> BoxFuture<'_, parquet::errors::Result<Arc<ParquetMetaData>>> {
         Box::pin(async move {
-            let file_size = self.meta.size;
-            let mut loader = MetadataLoader::load(self, file_size as usize, None).await?;
-            loader.load_page_index(false, false).await?;
-            Ok(Arc::new(loader.finish()))
+            self.object_cache
+                .get_parquet_metadata(&self.file_path, self.clone(), self.meta.size)
+                .await
+                .map_err(|err| ParquetError::External(Box::new(err)))
         })
     }
 }

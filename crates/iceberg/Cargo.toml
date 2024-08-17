@@ -60,7 +60,7 @@ derive_builder = { workspace = true }
 fnv = { workspace = true }
 futures = { workspace = true }
 itertools = { workspace = true }
-moka = { version = "0.12.8", features = ["future"] }
+moka = { version = "0.12", features = ["future"] }
 murmur3 = { workspace = true }
 once_cell = { workspace = true }
 opendal = { workspace = true }
@@ -75,6 +75,7 @@ serde_json = { workspace = true }
 serde_repr = { workspace = true }
 serde_with = { workspace = true }
 tokio = { workspace = true, optional = true }
+tracing = { version = "0.1.40", features = ["async-await"] }
 typed-builder = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
