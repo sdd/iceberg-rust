@@ -45,7 +45,9 @@ PARTITIONED BY (days(tpep_pickup_datetime));
 
 ALTER TABLE nyc.taxis SET TBLPROPERTIES (
     'write.parquet.row-group-size-bytes'='131072',
-    'write.parquet.page-row-limit'='200'
+    'write.parquet.page-row-limit'='200',
+    'write.delete.mode'='merge-on-read',
+    'write.merge.mode'='merge-on-read'
 );
 ALTER TABLE nyc.taxis WRITE DISTRIBUTED BY PARTITION LOCALLY ORDERED BY fare_amount;
 
@@ -57,5 +59,16 @@ OPTIONS (
 
 -- Repeat the insert to accumulate multiple snapshots and manifest files
 INSERT INTO nyc.taxis SELECT * FROM parquetTable;
+INSERT INTO nyc.taxis SELECT * FROM parquetTable;
 --INSERT INTO nyc.taxis SELECT * FROM parquetTable;
---INSERT INTO nyc.taxis SELECT * FROM parquetTable;
+
+-- Create some delete files
+DELETE FROM nyc.taxis
+    WHERE tpep_pickup_datetime >= '2024-02-01T00:00:00.000'
+    AND tpep_pickup_datetime    < '2024-02-01T00:01:00.000';
+DELETE FROM nyc.taxis
+    WHERE tpep_pickup_datetime >= '2024-02-02T00:00:00.000'
+    AND tpep_pickup_datetime    < '2024-02-02T00:00:10.000';
+DELETE FROM nyc.taxis
+    WHERE tpep_pickup_datetime >= '2024-02-03T00:00:00.000'
+    AND tpep_pickup_datetime    < '2024-02-03T00:00:01.000';
