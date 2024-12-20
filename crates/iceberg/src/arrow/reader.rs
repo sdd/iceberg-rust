@@ -191,12 +191,12 @@ impl ArrowReader {
     // retrieve all delete files concurrently from FileIO and parse them
     // into `Deletes` objects
     async fn get_deletes(
-        delete_file_entries: Option<Arc<Vec<FileScanTaskDeleteFile>>>,
+        delete_file_entries: Vec<FileScanTaskDeleteFile>,
         file_io: FileIO,
         concurrency_limit_data_files: usize,
-    ) -> Result<Option<Vec<Deletes>>> {
-        let Some(delete_file_entries) = delete_file_entries else {
-            return Ok(None);
+    ) -> Result<Vec<Deletes>> {
+        if delete_file_entries.is_empty() {
+            return Ok(vec![]);
         };
 
         let (tx, rx) = channel(concurrency_limit_data_files);
@@ -258,9 +258,9 @@ impl ArrowReader {
 
         let results = rx.try_collect::<Vec<_>>().await?;
         if results.is_empty() {
-            Ok(None)
+            Ok(vec![])
         } else {
-            Ok(Some(results))
+            Ok(results)
         }
     }
 
@@ -548,7 +548,7 @@ impl ArrowReader {
         });
 
         let should_load_page_index =
-            (row_selection_enabled && task.predicate.is_some()) || task.deletes.is_some();
+            (row_selection_enabled && task.predicate.is_some()) || !task.deletes.is_empty();
         let mut record_batch_stream_builder = Self::create_parquet_record_batch_stream_builder(
             &task.data_file_path,
             file_io,
@@ -577,8 +577,8 @@ impl ArrowReader {
         }
 
         let delete_files = delete_files_fut.await?;
-        let delete_predicate = if let Some(ref delete_files) = delete_files {
-            Self::get_equality_deletes(delete_files, task.schema.clone())?
+        let delete_predicate = if !delete_files.is_empty() {
+            Self::get_equality_deletes(&delete_files, task.schema.clone())?
         } else {
             None
         };
@@ -652,8 +652,8 @@ impl ArrowReader {
             }
         }
 
-        let positional_delete_indexes = if let Some(ref delete_files) = delete_files {
-            Self::get_positional_delete_indexes(&task.data_file_path, delete_files)
+        let positional_delete_indexes = if !delete_files.is_empty() {
+            Self::get_positional_delete_indexes(&task.data_file_path, &delete_files)
         } else {
             None
         };
