@@ -86,3 +86,4 @@ mod utils;
 pub mod writer;
 
 mod puffin;
+mod deletes;

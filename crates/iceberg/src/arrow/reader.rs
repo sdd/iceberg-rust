@@ -32,7 +32,8 @@ use arrow_string::like::starts_with;
 use bytes::Bytes;
 use fnv::FnvHashSet;
 use futures::future::BoxFuture;
-use futures::{try_join, FutureExt, StreamExt, TryFutureExt, TryStreamExt};
+use futures::{try_join, FutureExt, StreamExt, TryFutureExt, TryStreamExt, SinkExt};
+use itertools::Itertools;
 use parquet::arrow::arrow_reader::{ArrowPredicateFn, ArrowReaderOptions, RowFilter, RowSelection};
 use parquet::arrow::async_reader::AsyncFileReader;
 use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask, PARQUET_FIELD_ID_META_KEY};
@@ -47,10 +48,12 @@ use crate::expr::visitors::page_index_evaluator::PageIndexEvaluator;
 use crate::expr::visitors::row_group_metrics_evaluator::RowGroupMetricsEvaluator;
 use crate::expr::{BoundPredicate, BoundReference};
 use crate::io::{FileIO, FileMetadata, FileRead};
-use crate::scan::{ArrowRecordBatchStream, FileScanTask, FileScanTaskStream};
-use crate::spec::{Datum, PrimitiveType, Schema};
+use crate::scan::{ArrowRecordBatchStream, FileScanTask, FileScanTaskDeleteFile, FileScanTaskStream};
+use crate::spec::{DataContentType, Datum, PrimitiveType, Schema};
 use crate::utils::available_parallelism;
 use crate::{Error, ErrorKind};
+use roaring::RoaringBitmap;
+use crate::deletes::Deletes;
 
 /// Builder to create ArrowReader
 pub struct ArrowReaderBuilder {
@@ -255,6 +258,81 @@ impl ArrowReader {
                 });
 
         Ok(Box::pin(record_batch_stream) as ArrowRecordBatchStream)
+    }
+
+    // retrieve all delete files concurrently from FileIO and parse them
+    // into `Deletes` objects
+    async fn get_deletes(
+        delete_file_entries: Vec<FileScanTaskDeleteFile>,
+        file_io: FileIO,
+        concurrency_limit_data_files: usize,
+    ) -> Result<Vec<Deletes>> {
+        if delete_file_entries.is_empty() {
+            return Ok(vec![]);
+        }
+
+        futures::stream::iter(delete_file_entries.into_iter().map(Ok))
+            .map_ok(|entry| {
+                let file_io = file_io.clone();
+                async move {
+                    let FileScanTaskDeleteFile {
+                        file_path,
+                        file_type,
+                        ..
+                    } = entry;
+
+                    let record_batch_stream = Self::create_parquet_record_batch_stream_builder(
+                        &file_path,
+                        file_io,
+                        false,
+                    )
+                    .await?
+                    .build()?
+                    .map_err(|err| Error::new(ErrorKind::DataInvalid, err.to_string()).with_source(err))
+                    .boxed();
+
+                    match file_type {
+                        DataContentType::PositionDeletes => Self::parse_positional_delete_file(record_batch_stream).await,
+                        DataContentType::EqualityDeletes => Self::parse_equality_delete_file(record_batch_stream).await,
+                        _ => Err(Error::new(
+                            ErrorKind::Unexpected,
+                            "Expected equality or positional delete",
+                        )),
+                    }
+                }
+            })
+            .try_buffer_unordered(concurrency_limit_data_files)
+            .try_collect()
+            .await
+    }
+
+    async fn parse_positional_delete_file(_record_batches: ArrowRecordBatchStream) -> Result<Deletes> {
+        todo!()
+    }
+
+    async fn parse_equality_delete_file(_record_batches: ArrowRecordBatchStream) -> Result<Deletes> {
+        todo!()
+    }
+
+    async fn create_parquet_record_batch_stream_builder(
+        data_file_path: &str,
+        file_io: FileIO,
+        should_load_page_index: bool,
+    ) -> Result<ParquetRecordBatchStreamBuilder<ArrowFileReader<impl FileRead + Sized>>> {
+        // Get the metadata for the Parquet file we need to read and build
+        // a reader for the data within
+        let parquet_file = file_io.new_input(data_file_path)?;
+        let (parquet_metadata, parquet_reader) =
+            try_join!(parquet_file.metadata(), parquet_file.reader())?;
+        let parquet_file_reader = ArrowFileReader::new(parquet_metadata, parquet_reader);
+
+        // Start creating the record batch stream, which wraps the parquet file reader
+        let record_batch_stream_builder = ParquetRecordBatchStreamBuilder::new_with_options(
+            parquet_file_reader,
+            ArrowReaderOptions::new().with_page_index(should_load_page_index),
+        )
+            .await?;
+        Ok(record_batch_stream_builder)
     }
 
     fn build_field_id_set_and_map(

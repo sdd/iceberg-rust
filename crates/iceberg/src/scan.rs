@@ -933,6 +933,19 @@ pub struct FileScanTask {
     pub predicate: Option<BoundPredicate>,
 }
 
+/// A task to scan part of file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FileScanTaskDeleteFile {
+    /// The delete file path
+    pub file_path: String,
+
+    /// delete file type
+    pub file_type: DataContentType,
+
+    /// partition id
+    pub partition_spec_id: i32,
+}
+
 impl FileScanTask {
     /// Returns the data file path of this file scan task.
     pub fn data_file_path(&self) -> &str {
