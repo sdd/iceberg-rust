@@ -87,6 +87,8 @@ uuid = { workspace = true }
 zstd = { workspace = true }
 
 [dev-dependencies]
+bit-vec = "0.8.0"
+bitvec.workspace = true
 ctor = { workspace = true }
 expect-test = { workspace = true }
 iceberg-catalog-memory = { workspace = true }

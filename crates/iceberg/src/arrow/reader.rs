@@ -372,13 +372,13 @@ impl ArrowReader {
                     // selected row group
                     selected_row_groups_idx += 1;
                 } else {
-                    // remove any positional deletes from the skipped page so that
-                    // `positional.deletes.min()` can be used
+                    // We're in a skipped row group. Advance the delete vector
+                    // iterator beyond all entries in this row group, if any.
                     delete_vector_iter.advance_to(next_row_group_base_idx);
                     next_deleted_row_idx_opt = delete_vector_iter.next();
 
-                    // still increment the current page base index but then skip to the next row group
-                    // in the file
+                    // still update the current row group base index 
+                    // but then skip to the next row group in the data file
                     current_row_group_base_idx += row_group_num_rows;
                     continue;
                 }
@@ -386,8 +386,8 @@ impl ArrowReader {
 
             let mut next_deleted_row_idx = match next_deleted_row_idx_opt {
                 Some(next_deleted_row_idx) => {
-                    // if the index of the next deleted row is beyond this row group, add a selection for
-                    // the remainder of this row group and skip to the next row group
+                    // if the index of the next deleted row is beyond this row group, add a
+                    // selection for the remainder of this row group and skip to the next row group
                     if next_deleted_row_idx >= next_row_group_base_idx {
                         results.push(RowSelector::select(row_group_num_rows as usize));
                         continue;
@@ -396,7 +396,7 @@ impl ArrowReader {
                     next_deleted_row_idx
                 }
 
-                // If there are no more pos deletes, add a selector for the entirety of this row group.
+                // If there are no more pos deletes, add a selector for this entire row group.
                 _ => {
                     results.push(RowSelector::select(row_group_num_rows as usize));
                     continue;
@@ -425,8 +425,8 @@ impl ArrowReader {
                         Some(next_deleted_row_idx) => next_deleted_row_idx,
                         _ => {
                             // We've processed the final positional delete.
-                            // Conclude the skip and then break so that we select the remaining
-                            // rows in the row group and move on to the next row group
+                            // Conclude the skip and then break, so that we select the remaining
+                            // rows in the row group, and move on to the next row group
                             results.push(RowSelector::skip(run_length));
                             break 'chunks;
                         }
@@ -1380,6 +1380,7 @@ mod tests {
     use arrow_array::{ArrayRef, RecordBatch, StringArray};
     use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
     use futures::TryStreamExt;
+    use itertools::Itertools;
     use parquet::arrow::arrow_reader::{RowSelection, RowSelector};
     use parquet::arrow::{ArrowWriter, ProjectionMask};
     use parquet::basic::Compression;
@@ -1696,6 +1697,8 @@ message schema {
 
     #[test]
     fn test_build_deletes_row_selection() {
+        use bitvec::prelude::*;
+        
         let schema_descr = get_test_schema_descr();
 
         let mut columns = vec![];
@@ -1715,10 +1718,39 @@ message schema {
         let selected_row_groups = Some(vec![1, 3]);
 
         /* cases to cover:
-           * {skip|select} {first|intermediate|last} {one row|multiple rows} in
-             {first|imtermediate|last} {skipped|selected} row group
-           * row group selection disabled
-        */
+           {skip|select} {first|intermediate|last} {one row|multiple rows} in
+             {first|intermediate|last} {skipped|selected} row group
+             
+           We can cover all of these by using three row groups, each with between 5 and 7 rows.
+           We can use a bitset to represent all possible cases:
+           
+           Bit 0: A = 0 if 0 or A = 1 if 1
+           Bit 1: Row group starts with ABBB if 0 or AABB if 1
+           Bit 3: Row group ends with B if 0 or !B if 1
+           Bit 4: Row group last run is len 1 if 0 or len 2 if 1
+           Bit 5: is this row group selected
+                      
+           Multiply this x3 so we can cover all possibilities for the first, middle, and last
+           row group, and we get 15 bits, or 32_768 combinations.
+         */
+        
+        for test_case in 0u32..(2u32.pow(15) - 1) {
+            let slice: &[u8; 4] = &test_case.to_be_bytes();
+            let mut bits = BitVec::<_, Lsb0>::from_slice(slice).iter().by_vals();
+            
+            let mut selected_row_groups = vec![];
+            let mut positional_deletes = vec![];
+            for rg_index in 0..3 {
+                let is_selected = bits.next().unwrap();
+                if is_selected {
+                    selected_row_groups.push(rg_index);
+                }
+
+                create_test_row_group_delete_vector(&bits);
+            }
+        }
+        
+        
 
         let positional_deletes = RoaringTreemap::from_iter(&[
             1, // in skipped rg 0, should be ignored
